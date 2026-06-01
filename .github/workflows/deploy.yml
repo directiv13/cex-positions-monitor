@@ -32,6 +32,11 @@ jobs:
           script: |
             set -e
             cd ${{ secrets.REMOTE_PATH }}
+
+            # Create logs dir and assign to app user (UID 999) before compose starts
+            mkdir -p logs
+            chown 999:999 logs
+
             # ensure docker and docker compose are available on the VPS
             docker compose pull --ignore-pull-failures || true
             docker compose up -d --build
