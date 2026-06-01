@@ -1,0 +1,9 @@
+python-telegram-bot==22.7
+python-binance==1.0.19
+httpx==0.28.1
+pydantic-settings==2.14.1
+python-dotenv==1.0.0
+loguru==0.7.3
+aiofiles==23.2.1
+pydantic==2.13.4
+websockets==16.0
