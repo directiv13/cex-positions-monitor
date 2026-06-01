@@ -4,7 +4,7 @@ Lightweight async bot that monitors Binance Spot & Futures for order and positio
 
 Requirements
 
-- Python 3.10+
+- Python 3.12+
 - Install pinned dependencies:
 
 ```bash

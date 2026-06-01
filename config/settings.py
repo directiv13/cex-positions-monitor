@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     TELEGRAM_ALLOWED_USERS: str = Field("", description="Comma-separated admin user IDs")
     TELEGRAM_CHANNEL_ID: str = Field(...)
     TELEGRAM_CHANNEL_THREAD_ID: int = Field(0, description="Topic thread ID; 0 = general channel")
+    TELEGRAM_PINNED_MESSAGE_ID: int = Field(0, description="Pinned dashboard message id; 0 = not set")
 
     BINANCE_API_KEY: str = Field("", description="Binance API key")
     BINANCE_API_SECRET: str = Field("", description="Binance API secret")

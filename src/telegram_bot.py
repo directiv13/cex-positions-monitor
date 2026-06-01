@@ -37,6 +37,7 @@ class TelegramBot:
         channel_thread_id: int,
         exchange,
         change_monitor,
+        pinned_message_id: int = 0,
     ) -> None:
         self._token = token
         self._allowed_users = allowed_users
@@ -44,7 +45,8 @@ class TelegramBot:
         self._channel_thread_id = channel_thread_id or None  # 0 → None (general channel)
         self._exchange = exchange
         self._monitor = change_monitor
-        self._pinned_message_id: int | None = None
+        # Use configured pinned id (0 == not set)
+        self._pinned_message_id: int | None = pinned_message_id or None
         self._paused = False
         self._app = None
 

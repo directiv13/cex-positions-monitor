@@ -30,6 +30,7 @@ async def main() -> None:
         settings.TELEGRAM_CHANNEL_THREAD_ID,
         exchange,
         monitor,
+        settings.TELEGRAM_PINNED_MESSAGE_ID,
     )
 
     # Event callback wiring
@@ -45,7 +46,6 @@ async def main() -> None:
             "EXPIRED",
             "UPDATED",
             "STATUS_CHANGED:NEW",
-            "STATUS_CHANGED:PARTIALLY_FILLED",
             "STATUS_CHANGED:CANCELED",
             "STATUS_CHANGED:REJECTED",
             "STATUS_CHANGED:EXPIRED",
