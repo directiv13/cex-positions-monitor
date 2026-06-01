@@ -9,14 +9,15 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# Install dependencies first for better cache
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Copy project
 COPY . /app
 
-RUN addgroup --system app && adduser --system --ingroup app app
+RUN addgroup --system app && adduser --system --ingroup app app \
+    && mkdir -p /app/logs \
+    && chown -R app:app /app/logs
+
 USER app
 
 CMD ["python", "main.py"]
