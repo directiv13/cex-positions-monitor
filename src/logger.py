@@ -11,16 +11,17 @@ def setup_logger(level: str = "INFO", log_file: str = "logs/bot.log") -> None:
     logger.add(sys.stderr, level=level)
 
     # file with rotation
-    p = Path(log_file)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    logger.add(
-        str(p),
-        rotation="00:00",
-        retention="14 days",
-        compression="gz",
-        level=level,
-        enqueue=True,
-    )
+    if log_file:
+        p = Path(log_file)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        logger.add(
+            str(p),
+            rotation="00:00",
+            retention="14 days",
+            compression="gz",
+            level=level,
+            enqueue=True,
+        )
 
 
 __all__ = ["setup_logger", "logger"]
