@@ -7,6 +7,7 @@ from loguru import logger
 from config import settings
 from src.logger import setup_logger
 from src.exchange.binance import BinanceExchange
+from src.models import OrderStatus
 from src.monitor import ChangeMonitor
 from src.pushover import PushoverNotifier
 from src.telegram_bot import TelegramBot
@@ -35,6 +36,9 @@ async def main() -> None:
 
     # Event callback wiring
     async def order_cb(order, event):
+        if order.status == OrderStatus.PARTIALLY_FILLED:
+            return
+
         txt = order.short_repr() + " | event=" + event
         await telegram.broadcast_to_channel(txt)
 
