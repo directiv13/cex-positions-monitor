@@ -37,6 +37,7 @@ class TelegramBot:
         channel_thread_id: int,
         exchange,
         change_monitor,
+        dashboard_poll_interval: int = 30,
         pinned_message_id: int = 0,
     ) -> None:
         self._token = token
@@ -45,6 +46,7 @@ class TelegramBot:
         self._channel_thread_id = channel_thread_id or None  # 0 → None (general channel)
         self._exchange = exchange
         self._monitor = change_monitor
+        self._dashboard_poll_interval = dashboard_poll_interval
         # Use configured pinned id (0 == not set)
         self._pinned_message_id: int | None = pinned_message_id or None
         self._paused = False
@@ -100,7 +102,9 @@ class TelegramBot:
                 f"Monitor    : {state}\n"
                 f"Exchange   : <code>{self._exchange.name}</code>\n"
                 f"Channel    : <code>{self._channel_id}</code>\n"
-                f"Dashboard  : {pinned}"
+                f"Dashboard  : {pinned}\n"
+                f"Poll every : <b>{self._dashboard_poll_interval}s</b>\n"
+                f"Paused     : {'Yes' if self._paused else 'No'}"
             )
 
         @auth
@@ -125,12 +129,12 @@ class TelegramBot:
         @auth
         async def cmd_pause(update, context):
             self._paused = True
-            await update.message.reply_text("⏸ Notifications paused.")
+            await update.message.reply_text("⏸ Dashboard updates paused.")
 
         @auth
         async def cmd_resume(update, context):
             self._paused = False
-            await update.message.reply_text("▶️ Notifications resumed.")
+            await update.message.reply_text("▶️ Dashboard updates resumed.")
 
         for name, handler in [
             ("start",     cmd_start),
@@ -146,23 +150,6 @@ class TelegramBot:
 
     # ── Outbound: channel broadcast ────────────────────────────────────────────
 
-    async def broadcast_to_channel(self, html_message: str) -> None:
-        """Send an event notification to the channel/topic. No-op if paused."""
-        if self._paused:
-            logger.debug("Broadcast skipped (paused)")
-            return
-        if self._app is None:
-            logger.debug("Telegram app not ready; dropping broadcast")
-            return
-        try:
-            await self._app.bot.send_message(
-                self._channel_id,
-                html_message,
-                parse_mode="HTML",
-                message_thread_id=self._channel_thread_id,
-            )
-        except Exception as exc:
-            logger.error("broadcast_to_channel failed: {}", exc)
 
     # ── Outbound: pinned dashboard ─────────────────────────────────────────────
 

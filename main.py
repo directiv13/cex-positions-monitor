@@ -24,6 +24,12 @@ async def main() -> None:
 
     monitor = ChangeMonitor(exchange, reconcile_interval=settings.REST_RECONCILE_INTERVAL)
 
+    if settings.DASHBOARD_POLL_INTERVAL < 10:
+        logger.warning(
+            "DASHBOARD_POLL_INTERVAL=%s is below the recommended minimum of 10s. Telegram may rate-limit editMessageText calls.",
+            settings.DASHBOARD_POLL_INTERVAL,
+        )
+
     telegram = TelegramBot(
         settings.TELEGRAM_BOT_TOKEN,
         settings.allowed_users(),
@@ -31,50 +37,51 @@ async def main() -> None:
         settings.TELEGRAM_CHANNEL_THREAD_ID,
         exchange,
         monitor,
+        settings.DASHBOARD_POLL_INTERVAL,
         settings.TELEGRAM_PINNED_MESSAGE_ID,
     )
 
-    # Event callback wiring
-    async def order_cb(order, event):
-        if order.status == OrderStatus.PARTIALLY_FILLED:
-            return
+    def make_order_callback(pushover_notifier: PushoverNotifier):
+        async def _cb(order, event):
+            if order.status == OrderStatus.PARTIALLY_FILLED:
+                return
+            plain = order.short_repr() + " | event=" + event
+            if event == "OPENED":
+                await pushover_notifier.notify_order_opened(plain)
+            else:
+                await pushover_notifier.notify_order_closed(plain, event)
+        return _cb
 
-        txt = order.short_repr() + " | event=" + event
-        await telegram.broadcast_to_channel(txt)
+    def make_position_callback(pushover_notifier: PushoverNotifier):
+        async def _cb(position, event):
+            if event == "OPENED":
+                await pushover_notifier.notify_position_opened(position.short_repr())
+            elif event == "CLOSED":
+                await pushover_notifier.notify_position_closed(position.short_repr())
+        return _cb
 
-        if event in (
-            "OPENED",
-            "FILLED",
-            "CANCELED",
-            "REJECTED",
-            "EXPIRED",
-            "UPDATED",
-            "STATUS_CHANGED:NEW",
-            "STATUS_CHANGED:CANCELED",
-            "STATUS_CHANGED:REJECTED",
-            "STATUS_CHANGED:EXPIRED",
-        ):
-            snapshot = monitor.current_state()
-            open_orders = [o for o in snapshot.orders.values() if o.is_open]
-            await telegram.update_dashboard(open_orders, list(snapshot.positions.values()))
+    monitor.on_order_event(make_order_callback(pushover))
+    monitor.on_position_event(make_position_callback(pushover))
 
-    async def position_cb(position, event):
-        txt = position.short_repr() + " | event=" + event
-        await telegram.broadcast_to_channel(txt)
-
-        if event in ("OPENED", "CLOSED"):
-            snapshot = monitor.current_state()
-            open_orders = [o for o in snapshot.orders.values() if o.is_open]
-            await telegram.update_dashboard(open_orders, list(snapshot.positions.values()))
-
-    monitor.on_order_event(order_cb)
-    monitor.on_position_event(position_cb)
+    async def _dashboard_refresh_loop() -> None:
+        while True:
+            try:
+                await asyncio.sleep(settings.DASHBOARD_POLL_INTERVAL)
+                if telegram._paused:
+                    continue
+                snapshot = monitor.current_state()
+                open_orders = [o for o in snapshot.orders.values() if o.is_open]
+                await telegram.update_dashboard(open_orders, list(snapshot.positions.values()))
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.error("Dashboard refresh loop error: {}", exc)
 
     loop = asyncio.get_event_loop()
 
     async def _shutdown():
         logger.info("Shutting down")
-        await monitor.stop()
+        monitor.stop()
         await telegram.shutdown()
         await exchange.stop()
 
@@ -85,7 +92,7 @@ async def main() -> None:
             # Windows sometimes raises
             pass
 
-    await asyncio.gather(monitor.start(), telegram.run_polling())
+    await asyncio.gather(monitor.start(), telegram.run_polling(), _dashboard_refresh_loop())
 
 
 if __name__ == "__main__":

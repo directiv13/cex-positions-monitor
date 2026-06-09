@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     PUSHOVER_APP_TOKEN: str = Field("", description="Pushover app token")
     PUSHOVER_USER_KEY: str = Field("", description="Pushover user key")
 
+    DASHBOARD_POLL_INTERVAL: int = Field(30, description="Seconds between dashboard refreshes")
+
     REST_RECONCILE_INTERVAL: int = Field(120, description="Seconds between REST reconciliation")
 
     LOG_LEVEL: str = Field("INFO")
