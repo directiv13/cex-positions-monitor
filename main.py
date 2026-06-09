@@ -54,13 +54,13 @@ async def main() -> None:
     def make_position_callback(telegram_bot: TelegramBot, pushover_notifier: PushoverNotifier):
         async def _cb(position, event):
             # Send message to Telegram channel
-            await telegram_bot.broadcast_message(position)
+            await telegram_bot.broadcast_message(position.short_repr() + " | event=" + event)
 
             # Send Pushover notification for position events
             if event == "OPENED":
-                await pushover_notifier.notify_position_opened(position.short_repr())
+                await pushover_notifier.notify_position_opened(position)
             elif event == "CLOSED":
-                await pushover_notifier.notify_position_closed(position.short_repr())
+                await pushover_notifier.notify_position_closed(position)
         return _cb
 
     monitor.on_order_event(make_order_callback(telegram))

@@ -3,6 +3,8 @@ from __future__ import annotations
 import httpx
 from loguru import logger
 
+from src.models import Position
+
 
 PRIORITY_LOWEST = -2
 PRIORITY_LOW = -1
@@ -42,16 +44,9 @@ class PushoverNotifier:
             logger.exception("Pushover send failed")
             return False
 
-    async def notify_order_opened(self, order_repr: str) -> bool:
-        return await self.send("Order Opened", order_repr, priority=PRIORITY_NORMAL, sound="cashregister")
+    async def notify_position_opened(self, position: Position) -> bool:
+        side = "🟢 LONG" if position.direction == "LONG" else "🔴 SHORT"
+        return await self.send("Position Opened", (f"{side}\nSymbol: {position.symbol}"), priority=PRIORITY_HIGH, sound="cashregister")
 
-    async def notify_order_closed(self, order_repr: str, status: str) -> bool:
-        sound = "magic" if status == "FILLED" else "falling"
-        pr = PRIORITY_HIGH
-        return await self.send("Order Closed", order_repr, priority=pr, sound=sound)
-
-    async def notify_position_opened(self, position_repr: str) -> bool:
-        return await self.send("Position Opened", position_repr, priority=PRIORITY_NORMAL, sound="cashregister")
-
-    async def notify_position_closed(self, position_repr: str) -> bool:
-        return await self.send("Position Closed", position_repr, priority=PRIORITY_HIGH, sound="magic")
+    async def notify_position_closed(self, position: Position) -> bool:
+        return await self.send("Position Closed", f"Symbol: {position.symbol}", priority=PRIORITY_HIGH, sound="magic")
