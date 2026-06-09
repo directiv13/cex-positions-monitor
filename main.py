@@ -41,27 +41,30 @@ async def main() -> None:
         settings.TELEGRAM_PINNED_MESSAGE_ID,
     )
 
-    def make_order_callback(pushover_notifier: PushoverNotifier):
+    def make_order_callback(telegram_bot: TelegramBot):
         async def _cb(order, event):
             if order.status == OrderStatus.PARTIALLY_FILLED:
                 return
             plain = order.short_repr() + " | event=" + event
-            if event == "OPENED":
-                await pushover_notifier.notify_order_opened(plain)
-            else:
-                await pushover_notifier.notify_order_closed(plain, event)
+
+            # Send message to Telegram channel
+            await telegram_bot.broadcast_message(plain)
         return _cb
 
-    def make_position_callback(pushover_notifier: PushoverNotifier):
+    def make_position_callback(telegram_bot: TelegramBot, pushover_notifier: PushoverNotifier):
         async def _cb(position, event):
+            # Send message to Telegram channel
+            await telegram_bot.broadcast_message(position)
+
+            # Send Pushover notification for position events
             if event == "OPENED":
                 await pushover_notifier.notify_position_opened(position.short_repr())
             elif event == "CLOSED":
                 await pushover_notifier.notify_position_closed(position.short_repr())
         return _cb
 
-    monitor.on_order_event(make_order_callback(pushover))
-    monitor.on_position_event(make_position_callback(pushover))
+    monitor.on_order_event(make_order_callback(telegram))
+    monitor.on_position_event(make_position_callback(telegram,pushover))
 
     async def _dashboard_refresh_loop() -> None:
         while True:

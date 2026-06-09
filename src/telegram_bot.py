@@ -241,6 +241,26 @@ class TelegramBot:
                 await asyncio.sleep(1)
         except asyncio.CancelledError:
             return
+        
+    async def broadcast_message(self, text: str) -> None:
+        """Send a plain text message to the channel."""
+        if self._paused:
+            logger.debug("Bot is paused; skipping broadcast message")
+            return
+        
+        if self._app is None:
+            logger.debug("Telegram app not ready; skipping broadcast")
+            return
+        
+        try:
+            await self._app.bot.send_message(
+                self._channel_id,
+                text,
+                parse_mode="HTML",
+                message_thread_id=self._channel_thread_id,
+            )
+        except Exception as exc:
+            logger.error("Failed to send broadcast message: {}", exc)
 
     async def shutdown(self) -> None:
         if self._app is None:
