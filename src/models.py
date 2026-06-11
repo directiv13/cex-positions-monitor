@@ -70,7 +70,7 @@ class Position:
     entry_price: float
     mark_price: float
     position_amt: float     # positive = LONG, negative = SHORT
-    unrealised_pnl: float
+    realised_pnl: float
     leverage: int
     margin_type: str        # isolated / cross
     liquidation_price: float
@@ -86,17 +86,24 @@ class Position:
         return "LONG" if self.position_amt > 0 else "SHORT"
 
     def short_repr(self) -> str:
-        sign = "+" if self.unrealised_pnl >= 0 else ""
-        return (
-            f"[{self.exchange}/FUTURES]"
-            f"\n\n<b>{f"🔴 SHORT" if self.direction == 'SHORT' else f"🟢 LONG"}</b>\n"
-            f"\n<b>Amount:</b> {abs(self.position_amt)}"
-            f"\n<b>Symbol:</b> <code>{self.symbol}</code>"
-            f"\n<b>Entry Price:</b> {self.entry_price}"
-            f"\n<b>Mark Price:</b> {self.mark_price} "
-            f"\n<b>PnL:</b> {sign}{self.unrealised_pnl:.4f} USDT"
-            f"\n<b>Liquidation Price:</b> {self.liquidation_price}"
-        )
+        state = " OPEN" if self.is_open else " CLOSED"
+        emodji = "❌"
+        direction = self.direction
+        msg = (f"[{self.exchange}/FUTURES]"
+                f"\n\n<b>{emodji}{state}{direction} <code>{self.symbol}</code></b>\n")
+        
+        if self.is_open:
+            emodji = "🟢" if self.position_amt > 0 else "🔴"
+            direction = f" {direction}"  # add space for better formatting when open
+            msg += (
+                f"\n<b>Amount:</b> {abs(self.position_amt)}"
+                f"\n<b>Entry Price:</b> {self.entry_price}"
+            )
+        else:
+            sign = "+" if self.realised_pnl >= 0 else ""
+            msg += f"\n<b>Realised PnL:</b> {sign}{self.realised_pnl:.4f} USDT"
+
+        return msg
 
 
 @dataclass

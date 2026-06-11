@@ -345,7 +345,7 @@ class BinanceExchange(ExchangeBase):
             entry = 0.0
 
         try:
-            pnl = float(raw.get("up") or 0)
+            pnl = float(raw.get("cr") or 0)
         except (TypeError, ValueError):
             pnl = 0.0
 
@@ -361,7 +361,7 @@ class BinanceExchange(ExchangeBase):
             entry_price=entry,
             mark_price=0.0,           # not available in ACCOUNT_UPDATE
             position_amt=amt,
-            unrealised_pnl=pnl,
+            realised_pnl=pnl,
             leverage=1,               # not available in ACCOUNT_UPDATE
             margin_type=str(raw.get("mt") or "cross"),
             liquidation_price=0.0,    # not available in ACCOUNT_UPDATE

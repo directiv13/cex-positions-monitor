@@ -148,9 +148,6 @@ class TelegramBot:
         ]:
             self._app.add_handler(CommandHandler(name, handler))
 
-    # ── Outbound: channel broadcast ────────────────────────────────────────────
-
-
     # ── Outbound: pinned dashboard ─────────────────────────────────────────────
 
     async def update_dashboard(
