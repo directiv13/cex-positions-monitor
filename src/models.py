@@ -87,22 +87,17 @@ class Position:
         return "LONG" if self.position_amt > 0 else "SHORT"
 
     def short_repr(self) -> str:
-        state = " OPEN" if self.is_open else " CLOSED"
-        emodji = "❌"
-        direction = self.direction
-        msg = (f"[{self.exchange}/FUTURES]"
-                f"\n\n<b>{emodji}{state}{direction} <code>{self.symbol}</code></b>\n")
+        msg = f"[{self.exchange}/FUTURES]\n"
         
         if self.is_open:
             emodji = "🟢" if self.position_amt > 0 else "🔴"
-            direction = f" {direction}"  # add space for better formatting when open
-            msg += (
-                f"\n<b>Amount:</b> {abs(self.position_amt)}"
-                f"\n<b>Entry Price:</b> {self.entry_price}"
-            )
+            msg += (f"\n<b>{emodji} OPEN {self.direction} POSITION <code>{self.symbol}</code></b>\n"
+                    f"\n<b>Amount:</b> {abs(self.position_amt)}"
+                    f"\n<b>Entry Price:</b> {self.entry_price}")
         else:
             sign = "+" if self.realised_pnl >= 0 else ""
-            msg += f"\n<b>Realised PnL:</b> {sign}{self.realised_pnl:.4f} USDT"
+            msg += (f"\n<b>❌ CLOSED POSITION <code>{self.symbol}</code></b>\n"
+                    f"\n<b>Realised PnL:</b> {sign}{self.realised_pnl:.4f} USDT")
 
         return msg
 
