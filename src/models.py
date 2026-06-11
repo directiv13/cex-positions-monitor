@@ -71,6 +71,7 @@ class Position:
     mark_price: float
     position_amt: float     # positive = LONG, negative = SHORT
     realised_pnl: float
+    unrealised_pnl: float
     leverage: int
     margin_type: str        # isolated / cross
     liquidation_price: float

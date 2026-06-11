@@ -444,6 +444,7 @@ class BinanceExchange(ExchangeBase):
             entry_price=entry,
             mark_price=mark,
             position_amt=amt,
+            realised_pnl=0.0,  # not available in REST endpoint, only ACCOUNT_UPDATE WS events
             unrealised_pnl=pnl,
             leverage=lev,
             margin_type=str(raw.get("marginType") or "cross"),
