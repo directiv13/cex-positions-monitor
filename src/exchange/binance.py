@@ -362,6 +362,7 @@ class BinanceExchange(ExchangeBase):
             mark_price=0.0,           # not available in ACCOUNT_UPDATE
             position_amt=amt,
             realised_pnl=pnl,
+            unrealised_pnl=0.0,      # not available in ACCOUNT_UPDATE
             leverage=1,               # not available in ACCOUNT_UPDATE
             margin_type=str(raw.get("mt") or "cross"),
             liquidation_price=0.0,    # not available in ACCOUNT_UPDATE
