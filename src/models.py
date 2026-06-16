@@ -30,6 +30,8 @@ class Order:
     order_type: str     # LIMIT / MARKET / STOP …
     status: OrderStatus
     price: float
+    bids_notional: float
+    asks_notional: float
     orig_qty: float
     executed_qty: float
     time: datetime
@@ -37,6 +39,7 @@ class Order:
     exchange: str = "UNKNOWN"
     is_futures: bool = False
     update_type: str | None = None
+    is_reduce_only: bool = False
 
     @property
     def is_open(self) -> bool:

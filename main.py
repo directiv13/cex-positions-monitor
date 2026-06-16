@@ -5,6 +5,7 @@ import signal
 from loguru import logger
 
 from config import settings
+from src.formatter import order_message, position_message
 from src.logger import setup_logger
 from src.exchange.binance import BinanceExchange
 from src.models import OrderStatus
@@ -45,10 +46,10 @@ async def main() -> None:
         async def _cb(order, event):
             if order.status == OrderStatus.PARTIALLY_FILLED:
                 return
-            plain = order.short_repr() + " | event=" + event
+            text = order_message(order)
 
             # Send message to Telegram channel
-            await telegram_bot.broadcast_message(plain)
+            await telegram_bot.broadcast_message(text)
         return _cb
 
     def make_position_callback(telegram_bot: TelegramBot, pushover_notifier: PushoverNotifier):

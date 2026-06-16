@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import List
 
-from .models import Order, Position
+from .models import Order, Position, OrderStatus
 
 
 def _utcnow_str() -> str:
@@ -53,3 +53,49 @@ def positions_list_message(positions: List[Position]) -> str:
     for p in positions:
         parts.append(f"• {p.short_repr()}")
     return "\n".join(parts)
+
+def position_message(position: Position) -> str:
+    return position.short_repr()
+
+def order_message(order: Order) -> str:
+    emoji = ""
+    position_side = ""
+    order_type = ""
+    size = 0.0
+
+    if order.side == "SELL":
+        size = order.asks_notional
+        if order.is_reduce_only:
+            emoji = "🟢"
+            position_side = "LONG"
+            order_type = "CLOSE"
+        else:
+            emoji = "🔴"
+            position_side = "SHORT"
+            order_type = "OPEN"
+    elif order.side == "BUY":
+        size = order.bids_notional
+        if order.is_reduce_only:
+            emoji = "🔴"
+            position_side = "SHORT"
+            order_type = "CLOSE"
+        else:
+            emoji = "🟢"
+            position_side = "LONG"
+            order_type = "OPEN"
+
+    status_label = order.status.value
+    if order.update_type == "AMENDMENT" and order.status == OrderStatus.NEW:
+            status_label = "UPDATED"
+
+    msg = (f"<b>{emoji} {order_type} {position_side} ORDER</b>\n"
+           "────────────\n"
+           f"<b>Status: {status_label}</b>\n"
+           "────────────\n"
+           f"<code>{order.symbol}</code>\n\n"
+           f"{order.order_type}\n\n"
+           f"💲 <b>Price</b>:       ${order.price}\n"
+           f"🤑 <b>Amount</b>:      {order.orig_qty}\n"
+           f"💵 <b>Size</b>:        {size} USDT\n")
+
+    return msg
