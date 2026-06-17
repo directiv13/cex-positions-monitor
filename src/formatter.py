@@ -96,6 +96,6 @@ def order_message(order: Order) -> str:
            f"{order.order_type}\n\n"
            f"💲 <b>Price</b>:       ${order.price}\n"
            f"🤑 <b>Amount</b>:      {order.orig_qty}\n"
-           f"💵 <b>Size</b>:        {size} USDT\n")
+           f"💵 <b>Size</b>:        {size:+.2f} USDT\n")
 
     return msg

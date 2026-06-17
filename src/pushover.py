@@ -14,15 +14,15 @@ PRIORITY_EMERGENCY = 2
 
 
 class PushoverNotifier:
-    def __init__(self, app_token: str, user_key: str):
+    def __init__(self, app_token: str, user_keys: list[str]):
         self.app_token = app_token
-        self.user_key = user_key
+        self.user_keys = user_keys
         self._client = httpx.AsyncClient(timeout=10.0)
 
-    async def send(self, title: str, message: str, priority: int = 0, sound: str = "pushover", url: str | None = None, url_title: str | None = None) -> bool:
+    async def send(self, user_key: str, title: str, message: str, priority: int = 0, sound: str = "pushover", url: str | None = None, url_title: str | None = None) -> bool:
         data = {
             "token": self.app_token,
-            "user": self.user_key,
+            "user": user_key,
             "title": title,
             "message": message,
             "priority": str(priority),
@@ -46,7 +46,13 @@ class PushoverNotifier:
 
     async def notify_position_opened(self, position: Position) -> bool:
         side = "🟢 LONG" if position.direction == "LONG" else "🔴 SHORT"
-        return await self.send("Position Opened", (f"{side}\nSymbol: {position.symbol}"), priority=PRIORITY_HIGH, sound="cashregister")
+        for user_key in self.user_keys:
+            if not await self.send(user_key, "Position Opened", f"{side}\nSymbol: {position.symbol}", priority=PRIORITY_HIGH, sound="cashregister"):
+                return False
+        return True
 
     async def notify_position_closed(self, position: Position) -> bool:
-        return await self.send("Position Closed", f"Symbol: {position.symbol}", priority=PRIORITY_HIGH, sound="magic")
+        for user_key in self.user_keys:
+            if not await self.send(user_key, "Position Closed", f"Symbol: {position.symbol}", priority=PRIORITY_HIGH, sound="magic"):
+                return False
+        return True

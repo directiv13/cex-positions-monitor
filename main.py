@@ -21,7 +21,7 @@ async def main() -> None:
     exchange = BinanceExchange(settings.BINANCE_API_KEY, settings.BINANCE_API_SECRET, settings.BINANCE_TESTNET)
     await exchange.start()
 
-    pushover = PushoverNotifier(settings.PUSHOVER_APP_TOKEN, settings.PUSHOVER_USER_KEY)
+    pushover = PushoverNotifier(settings.PUSHOVER_APP_TOKEN, settings.pushover_user_keys())
 
     monitor = ChangeMonitor(exchange, reconcile_interval=settings.REST_RECONCILE_INTERVAL)
 

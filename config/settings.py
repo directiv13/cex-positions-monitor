@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     BINANCE_TESTNET: bool = Field(False)
 
     PUSHOVER_APP_TOKEN: str = Field("", description="Pushover app token")
-    PUSHOVER_USER_KEY: str = Field("", description="Pushover user key")
+    PUSHOVER_USER_KEYS: str = Field("", description="Comma-separated Pushover user keys")
 
     DASHBOARD_POLL_INTERVAL: int = Field(30, description="Seconds between dashboard refreshes")
 
@@ -44,6 +44,13 @@ class Settings(BaseSettings):
             except ValueError:
                 continue
         return out
+    
+    def pushover_user_keys(self) -> List[str]:
+        raw = (self.PUSHOVER_USER_KEYS or "").strip()
+        if not raw:
+            return []
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        return parts
 
 
 settings = Settings()
