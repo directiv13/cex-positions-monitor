@@ -40,6 +40,7 @@ class Order:
     is_futures: bool = False
     update_type: str | None = None
     is_reduce_only: bool = False
+    position_side: PositionSide | None = None
 
     @property
     def is_open(self) -> bool:
@@ -75,7 +76,7 @@ class Position:
     position_amt: float     # positive = LONG, negative = SHORT
     realised_pnl: float
     unrealised_pnl: float
-    leverage: int
+    leverage: int | None
     margin_type: str        # isolated / cross
     liquidation_price: float
     exchange: str = "UNKNOWN"
@@ -94,13 +95,16 @@ class Position:
         
         if self.is_open:
             emodji = "🟢" if self.position_amt > 0 else "🔴"
-            msg += (f"\n<b>{emodji} OPEN {self.direction} POSITION <code>{self.symbol}</code></b>\n"
-                    f"\n<b>Amount:</b> {abs(self.position_amt)}"
-                    f"\n<b>Entry Price:</b> {self.entry_price}")
+            msg += (f"\n<b>{emodji} OPEN {self.direction} POSITION</b>\n"
+                    f"\n<code>{self.symbol}</code>\n"
+                    f"\n{self.margin_type.upper()} | {f'{self.leverage}x' if self.leverage is not None else '?x'}\n"
+                    f"\n🤑 <b>Amount:</b> {abs(self.position_amt)}"
+                    f"\n💲 <b>Entry Price:</b> {self.entry_price}")
         else:
             sign = "+" if self.realised_pnl >= 0 else ""
-            msg += (f"\n<b>❌ CLOSED POSITION <code>{self.symbol}</code></b>\n"
-                    f"\n<b>Realised PnL:</b> {sign}{self.realised_pnl:.4f} USDT")
+            msg += (f"\n<b>❌ CLOSED POSITION</b>\n"
+                    f"\n<code>{self.symbol}</code>\n"
+                    f"\n💲 <b>Realised PnL:</b> {sign}{self.realised_pnl:.4f} USDT")
 
         return msg
 
@@ -108,7 +112,7 @@ class Position:
 @dataclass
 class StateSnapshot:
     orders: dict[int, Order] = field(default_factory=dict)       # order_id → Order
-    positions: dict[str, Position] = field(default_factory=dict)  # symbol   → Position
+    positions: dict[str, Position] = field(default_factory=dict)  # "SYMBOL_SIDE" → Position
 
     def copy(self) -> StateSnapshot:
         """Return a deep copy so callers cannot mutate live state."""

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 from collections.abc import Callable, Awaitable
+from dataclasses import replace as dc_replace
 
 from loguru import logger
 
 from .exchange.base import ExchangeBase
 from .models import Order, OrderStatus, Position, StateSnapshot
+
+
+def _pos_key(p: Position) -> str:
+    return f"{p.symbol}_{p.position_side.value}"
 
 OrderCallback    = Callable[[Order,    str], Awaitable[None]]
 PositionCallback = Callable[[Position, str], Awaitable[None]]
@@ -49,7 +53,7 @@ class ChangeMonitor:
             for o in orders:
                 self._state.orders[o.order_id] = o
             for p in positions:
-                self._state.positions[p.symbol] = p
+                self._state.positions[_pos_key(p)] = p
             logger.info(
                 "Cold start complete: {} orders, {} positions",
                 len(orders), len(positions),
@@ -145,7 +149,7 @@ class ChangeMonitor:
             if oid not in rest_map and existing.is_open:
                 # Build a synthetic closed order with the most likely terminal status
                 inferred_status = OrderStatus.FILLED
-                closed = copy.replace(existing, status=inferred_status)
+                closed = dc_replace(existing, status=inferred_status)
                 logger.debug(
                     "Order {} absent from REST while open locally — inferring {}",
                     oid, inferred_status.value,
@@ -161,7 +165,7 @@ class ChangeMonitor:
           B) Symbol in local but not REST, and open   → CLOSED (missed WebSocket event)
           C) Symbol in both but side flipped          → CLOSED old, OPENED new
         """
-        rest_map = {p.symbol: p for p in rest_positions}
+        rest_map = {_pos_key(p): p for p in rest_positions}
 
         # Case A and C
         for sym, pos in rest_map.items():
@@ -176,14 +180,22 @@ class ChangeMonitor:
                     and existing.direction != pos.direction
                 ):
                     # Close the old side first, then open the new one
-                    closed = copy.replace(existing, position_amt=0.0)
+                    closed = dc_replace(existing, position_amt=0.0)
                     await self._handle_position_event(closed)
                     await self._handle_position_event(pos)
+                else:
+                    # Silently refresh REST-only fields not available in WS events.
+                    self._state.positions[sym] = dc_replace(
+                        existing,
+                        leverage=pos.leverage,
+                        liquidation_price=pos.liquidation_price,
+                        mark_price=pos.mark_price,
+                    )
 
         # Case B — position was open locally but absent from REST
         for sym, existing in list(self._state.positions.items()):
             if sym not in rest_map and existing.is_open:
-                closed = copy.replace(existing, position_amt=0.0)
+                closed = dc_replace(existing, position_amt=0.0)
                 logger.debug(
                     "Position {} absent from REST while open locally — inferring CLOSED", sym
                 )
@@ -221,20 +233,31 @@ class ChangeMonitor:
         await self._fire_order(order, event)
 
     async def _handle_position_event(self, position: Position) -> None:
-        sym = position.symbol
+        key = _pos_key(position)
 
-        if sym not in self._state.positions:
+        # Merge REST-only fields (leverage, liquidation_price) from existing state
+        # when the incoming position came from a WebSocket event that lacks them.
+        existing = self._state.positions.get(key)
+        if existing and position.leverage is None:
+            position = dc_replace(
+                position,
+                leverage=existing.leverage,
+                liquidation_price=existing.liquidation_price or position.liquidation_price,
+            )
+
+        if key not in self._state.positions:
             if not position.is_open:
                 # Closed position we never tracked — ignore
                 return
             event = "OPENED"
-            self._state.positions[sym] = position
+            self._state.positions[key] = position
+
         elif not position.is_open:
             event = "CLOSED"
-            del self._state.positions[sym]
+            del self._state.positions[key]
         else:
             event = "UPDATED"
-            self._state.positions[sym] = position
+            self._state.positions[key] = position
 
         if event != "UPDATED":
             await self._fire_position(position, event)

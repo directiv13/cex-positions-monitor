@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import List
 
-from .models import Order, Position, OrderStatus
+from .models import Order, Position, OrderStatus, PositionSide
 
 
 def _utcnow_str() -> str:
@@ -25,7 +25,8 @@ def dashboard_message(orders: List[Order], positions: List[Position]) -> str:
     if positions:
         parts.append("<b>📈 Open Positions</b>")
         for p in positions:
-            parts.append(f"• [{p.exchange}] {p.direction} <code>{p.position_amt}</code> <code>{p.symbol}</code> entry={_fmt_price(p.entry_price)}  PnL={p.unrealised_pnl:+.2f} USDT")
+            lev_str = f"{p.leverage}x" if p.leverage is not None else "?x"
+            parts.append(f"• [{p.exchange}] {p.direction} <code>{p.position_amt}</code> <code>{p.symbol}</code> entry={_fmt_price(p.entry_price)}  PnL={p.unrealised_pnl:+.2f} USDT  {lev_str} {p.margin_type.upper()}")
         parts.append("")
 
     if orders:
@@ -65,6 +66,17 @@ def order_message(order: Order) -> str:
 
     if order.side == "SELL":
         size = order.asks_notional
+    elif order.side == "BUY":
+        size = order.bids_notional
+
+    use_hedge_side = order.position_side not in (None, PositionSide.BOTH)
+    if use_hedge_side:
+        position_side = order.position_side.value
+        order_type = "CLOSE" if order.is_reduce_only else "OPEN"
+        # bearish = opening SHORT or closing LONG
+        is_bearish = (position_side == "SHORT") != order.is_reduce_only
+        emoji = "🔴" if is_bearish else "🟢"
+    elif order.side == "SELL":
         if order.is_reduce_only:
             emoji = "🟢"
             position_side = "LONG"
@@ -74,7 +86,6 @@ def order_message(order: Order) -> str:
             position_side = "SHORT"
             order_type = "OPEN"
     elif order.side == "BUY":
-        size = order.bids_notional
         if order.is_reduce_only:
             emoji = "🔴"
             position_side = "SHORT"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import websockets
 import json
+from dataclasses import replace as dc_replace
 
 from collections.abc import AsyncIterator
 from datetime import datetime
@@ -117,6 +118,10 @@ class BinanceExchange(ExchangeBase):
             return
 
         queue: asyncio.Queue[tuple[str, Order | Position]] = asyncio.Queue()
+        # Accumulates per-trade realized PnL (rp) from ORDER_TRADE_UPDATE so that
+        # ACCOUNT_UPDATE position-close events show trade PnL rather than the
+        # cumulative "cr" (Accumulated Realized Income) field.
+        _last_rp: dict[str, float] = {}
 
         # ── Spot listener ──────────────────────────────────────────────────────
         async def _spot_listener() -> None:
@@ -185,6 +190,15 @@ class BinanceExchange(ExchangeBase):
                             et = payload.get("e")
                             if et == "ORDER_TRADE_UPDATE":
                                 inner = payload.get("o") or {}
+                                try:
+                                    rp_val = float(inner.get("rp") or 0)
+                                    rp_sym = str(inner.get("s") or "")
+                                    rp_ps  = str(inner.get("ps") or "BOTH")
+                                    if rp_sym:
+                                        rp_key = f"{rp_sym}_{rp_ps}"
+                                        _last_rp[rp_key] = _last_rp.get(rp_key, 0.0) + rp_val
+                                except (TypeError, ValueError):
+                                    pass
                                 order = self._parse_order_from_ws(
                                     inner,
                                     is_futures=True,
@@ -199,6 +213,13 @@ class BinanceExchange(ExchangeBase):
                                     except (TypeError, ValueError):
                                         continue
                                     pos = self._parse_position_from_ws(p)
+                                    lev = await self._fetch_leverage(pos.symbol, pos.position_side.value)
+                                    if lev is not None:
+                                        pos = dc_replace(pos, leverage=lev)
+                                    if not pos.is_open:
+                                        rp_key = f"{pos.symbol}_{pos.position_side.value}"
+                                        if rp_key in _last_rp:
+                                            pos = dc_replace(pos, realised_pnl=_last_rp.pop(rp_key))
                                     await queue.put(("POSITION_UPDATE", pos))
                             elif et == "listenKeyExpired":
                                 logger.warning("Futures listenKey expired, reconnecting")
@@ -265,6 +286,23 @@ class BinanceExchange(ExchangeBase):
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
+    # ── REST helpers ──────────────────────────────────────────────────────────
+
+    async def _fetch_leverage(self, symbol: str, position_side: str) -> int | None:
+        """Return the current leverage for symbol/side from REST, or None on failure."""
+
+        assert self._client is not None, "AsyncClient not initialized"
+
+        try:
+            risk_list = await self._client.futures_position_information(symbol=symbol)
+            for risk in risk_list:
+                if risk.get("positionSide") == position_side:
+                    lev = int(float(risk.get("leverage") or 0))
+                    return lev if lev > 0 else None
+        except Exception as exc:
+            logger.debug("Could not fetch leverage for {}/{}: {}", symbol, position_side, exc)
+        return None
+
     # ── Parsing helpers ────────────────────────────────────────────────────────
 
     @staticmethod
@@ -305,6 +343,14 @@ class BinanceExchange(ExchangeBase):
 
         update_type = str(raw.get("x") or raw.get("X") or "").upper() or None
 
+        ps_raw = raw.get("ps") if is_futures else None
+        order_position_side: PositionSide | None = None
+        if ps_raw:
+            try:
+                order_position_side = PositionSide(ps_raw)
+            except ValueError:
+                pass
+
         return Order(
             order_id=int(raw.get("i") or raw.get("orderId") or 0),
             client_order_id=str(raw.get("c") or raw.get("clientOrderId") or ""),
@@ -323,6 +369,7 @@ class BinanceExchange(ExchangeBase):
             exchange=self.name,
             is_futures=is_futures,
             update_type=update_type,
+            position_side=order_position_side,
         )
 
     def _parse_position_from_ws(self, raw: dict) -> Position:
@@ -366,7 +413,7 @@ class BinanceExchange(ExchangeBase):
             position_amt=amt,
             realised_pnl=pnl,
             unrealised_pnl=0.0,      # not available in ACCOUNT_UPDATE
-            leverage=1,               # not available in ACCOUNT_UPDATE
+            leverage=None,            # not available in ACCOUNT_UPDATE
             margin_type=str(raw.get("mt") or "cross"),
             liquidation_price=0.0,    # not available in ACCOUNT_UPDATE
             exchange=self.name,
@@ -384,6 +431,14 @@ class BinanceExchange(ExchangeBase):
         time_dt = self._ts(time_ms) if time_ms else datetime.utcnow()
         update_dt = self._ts(update_ms) if update_ms else time_dt
 
+        rest_ps_raw = raw.get("positionSide") if is_futures else None
+        rest_order_position_side: PositionSide | None = None
+        if rest_ps_raw:
+            try:
+                rest_order_position_side = PositionSide(rest_ps_raw)
+            except ValueError:
+                pass
+
         return Order(
             order_id=int(raw.get("orderId") or 0),
             client_order_id=str(raw.get("clientOrderId") or ""),
@@ -400,6 +455,7 @@ class BinanceExchange(ExchangeBase):
             update_time=update_dt,
             exchange=self.name,
             is_futures=is_futures,
+            position_side=rest_order_position_side,
         )
 
     def _parse_position_from_rest(self, raw: dict) -> Position:
