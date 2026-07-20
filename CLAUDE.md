@@ -34,8 +34,8 @@ The bot is a single-process, fully async Python application (`asyncio`). `main.p
 | `config/settings.py` | Pydantic `BaseSettings`; all config is read from `.env`. Exposes `settings` singleton. |
 | `src/models.py` | Pure dataclasses: `Order`, `Position`, `StateSnapshot`. No persistence. |
 | `src/exchange/base.py` | `ExchangeBase` ABC. Implement `start/stop/fetch_open_orders/fetch_open_positions/stream_events` to add a new exchange. |
-| `src/exchange/binance.py` | Concrete Binance implementation. Spot stream uses `python-binance`; futures stream uses raw `websockets` with manual listenKey management. Both reconnect with exponential backoff (`min(2^n, 60)s`). Events are funnelled into a shared `asyncio.Queue` and yielded from `stream_events()`. |
-| `src/monitor.py` | `ChangeMonitor` owns the live `StateSnapshot`. It consumes `stream_events()` in one task and runs a REST reconciliation loop in another (default every 120 s). Reconciliation diffs the REST snapshot against in-memory state to catch missed WebSocket events, then fires `on_order_event`/`on_position_event` callbacks. |
+| `src/exchange/binance.py` | Concrete Binance implementation, **futures-only** (spot orders/positions tracking is intentionally disabled). The futures stream uses raw `websockets` with manual listenKey management and reconnects with exponential backoff (`min(2^n, 60)s`). Events are funnelled into a shared `asyncio.Queue` and yielded from `stream_events()`. Connection drops/restores are emitted as `("CONNECTION", {...})` items on the same queue. |
+| `src/monitor.py` | `ChangeMonitor` owns the live `StateSnapshot`. It consumes `stream_events()` in one task and runs a REST reconciliation loop in another (default every 120 s). **Only live WebSocket events fire notifications** (`on_order_event`/`on_position_event`); reconciliation updates in-memory state **silently** (no messages/pushes) so the pinned dashboard stays accurate without emitting misleading events. Connection events fire `on_connection_event`. |
 | `src/telegram_bot.py` | PTB (`python-telegram-bot`) application. Broadcasts event messages to the channel and keeps a pinned dashboard message in sync. The `_auth` decorator restricts commands to `TELEGRAM_ALLOWED_USERS`; empty list = unrestricted. |
 | `src/pushover.py` | `PushoverNotifier` sends push notifications to one or more user keys via `httpx`. |
 | `src/formatter.py` | Formats `Order`/`Position` objects into Telegram HTML strings. All outbound HTML is produced here. |
@@ -46,17 +46,21 @@ The bot is a single-process, fully async Python application (`asyncio`). `main.p
 ```
 BinanceExchange.stream_events()  ──►  ChangeMonitor._stream_consumer()
                                              │
-                               ┌─────────────┴──────────────┐
-                               ▼                            ▼
-                    _handle_order_event()        _handle_position_event()
-                               │                            │
-                          callbacks                    callbacks
-                               │                            │
-                    TelegramBot.broadcast_message()   PushoverNotifier.notify_*()
+                     ┌───────────────────────┼───────────────────────┐
+                     ▼                        ▼                       ▼
+          _handle_order_event()   _handle_position_event()  _handle_connection_event()
+                     │                        │                       │
+                 callbacks                callbacks               callbacks
+                     │                        │                       │
+      TelegramBot.broadcast_message()  PushoverNotifier.notify_*()  TelegramBot.broadcast_message()
+                                                                    (WS lost/restored alert)
 
 REST reconciliation (every 120s):
-  fetch_open_orders/positions  ──►  _diff_orders/_diff_positions  ──►  same callbacks
+  fetch_open_orders/positions  ──►  _diff_orders/_diff_positions  ──►  update StateSnapshot only
+                                                                       (NO notifications — dashboard only)
 ```
+
+Reconciliation is deliberately silent: `fetch_open_orders` returns only *open* orders, so an order that vanishes from it could have been filled **or** canceled/expired — indistinguishable at that layer. Rather than guess (which produced false "FILLED" messages), reconciliation just syncs state; all notifications come from live WebSocket events that carry the true status.
 
 The `StateSnapshot` is the single source of truth for in-memory state; `ChangeMonitor.current_state()` returns a deep copy so callers cannot mutate it.
 
