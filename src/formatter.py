@@ -58,6 +58,31 @@ def positions_list_message(positions: List[Position]) -> str:
 def position_message(position: Position) -> str:
     return position.short_repr()
 
+def connection_message(info: dict) -> str:
+    """Format a WebSocket connectivity change for the channel."""
+    stream = str(info.get("stream") or "WS")
+    status = str(info.get("status") or "").lower()
+
+    if status == "lost":
+        header = f"⚠️ <b>{stream} WebSocket disconnected</b>"
+        detail = "Live updates are paused; reconnecting…"
+    elif status == "restored":
+        header = f"✅ <b>{stream} WebSocket reconnected</b>"
+        detail = "Live updates resumed."
+    else:
+        header = f"ℹ️ <b>{stream} WebSocket: {status or 'unknown'}</b>"
+        detail = ""
+
+    error = info.get("error")
+    parts = [header]
+    if detail:
+        parts.append(detail)
+    if status == "lost" and error:
+        parts.append(f"<code>{error}</code>")
+    parts.append(f"<i>{_utcnow_str()}</i>")
+    return "\n".join(parts)
+
+
 def order_message(order: Order) -> str:
     emoji = ""
     position_side = ""

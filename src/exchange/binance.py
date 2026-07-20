@@ -23,7 +23,6 @@ class BinanceExchange(ExchangeBase):
         self._api_secret = api_secret
         self._testnet = testnet
         self._client = None
-        self._bsm = None
         self._running = False
         # Single stop-event owned here; stream_events watches it.
         self._stop_event: asyncio.Event = asyncio.Event()
@@ -32,7 +31,7 @@ class BinanceExchange(ExchangeBase):
 
     async def start(self) -> None:
         try:
-            from binance import AsyncClient, BinanceSocketManager
+            from binance import AsyncClient
         except ImportError:
             logger.error(
                 "python-binance is not installed. "
@@ -43,7 +42,6 @@ class BinanceExchange(ExchangeBase):
         self._client = await AsyncClient.create(
             self._api_key, self._api_secret, testnet=self._testnet
         )
-        self._bsm = BinanceSocketManager(self._client)
         self._running = True
         self._stop_event.clear()
         logger.info("BinanceExchange started (testnet={})", self._testnet)
@@ -64,11 +62,7 @@ class BinanceExchange(ExchangeBase):
         if self._client is None:
             return []
         orders: list[Order] = []
-        try:
-            for raw in await self._client.get_open_orders():
-                orders.append(self._parse_order_from_rest(raw, is_futures=False))
-        except Exception as exc:
-            logger.error("fetch spot open orders failed: {}", exc)
+        # Spot tracking is intentionally disabled — futures only.
         try:
             for raw in await self._client.futures_get_open_orders():
                 orders.append(self._parse_order_from_rest(raw, is_futures=True))
@@ -95,13 +89,13 @@ class BinanceExchange(ExchangeBase):
 
     # ── Real-time WebSocket stream ─────────────────────────────────────────────
 
-    async def stream_events(self) -> AsyncIterator[tuple[str, Order | Position]]:
+    async def stream_events(self) -> AsyncIterator[tuple[str, Order | Position | dict]]:
         """
         Async generator that yields (event_type, payload) tuples indefinitely.
 
-        Two background tasks (spot + futures listeners) push events into a shared
-        queue. This method drains the queue and yields each item, stopping cleanly
-        when stop() is called.
+        A futures listener task pushes events into a shared queue (spot tracking
+        is disabled). This method drains the queue and yields each item, stopping
+        cleanly when stop() is called.
 
         Reconnection uses exponential backoff: wait = min(2^attempt, 60) seconds.
         The backoff counter resets only after the first successful message.
@@ -110,53 +104,20 @@ class BinanceExchange(ExchangeBase):
         context manager exposes, rather than calling the no-arg variant that raises
         TypeError.
         """
-        if self._client is None or self._bsm is None:
+        if self._client is None:
             logger.error(
                 "BinanceExchange.stream_events called before start() or after a "
                 "failed start(). No events will be produced."
             )
             return
 
-        queue: asyncio.Queue[tuple[str, Order | Position]] = asyncio.Queue()
+        queue: asyncio.Queue[tuple[str, Order | Position | dict]] = asyncio.Queue()
         # Accumulates per-trade realized PnL (rp) from ORDER_TRADE_UPDATE so that
         # ACCOUNT_UPDATE position-close events show trade PnL rather than the
         # cumulative "cr" (Accumulated Realized Income) field.
         _last_rp: dict[str, float] = {}
 
-        # ── Spot listener ──────────────────────────────────────────────────────
-        async def _spot_listener() -> None:
-
-            assert self._bsm is not None, "BinanceSocketManager not initialized"
-
-            attempt = 0
-
-            while self._running:
-                try:
-                    async with self._bsm.user_socket() as socket:
-                        got_first = False
-                        while self._running:
-                            msg = await socket.recv()
-                            if not got_first:
-                                attempt = 0
-                                got_first = True
-                            payload = msg if isinstance(msg, dict) else {}
-                            et = payload.get("e")
-                            if et == "executionReport":
-                                order = self._parse_order_from_ws(payload, is_futures=False)
-                                await queue.put(("ORDER_UPDATE", order))
-                            elif et == "listenKeyExpired":
-                                # Key expired — break inner loop to force reconnect
-                                logger.warning("Spot listenKey expired, reconnecting")
-                                break
-                            elif et == "error":
-                                logger.error("Spot WS error event: {}", payload)
-                except asyncio.CancelledError:
-                    return
-                except Exception as exc:
-                    attempt += 1
-                    wait = min(2 ** attempt, 60)
-                    logger.debug("Spot WS disconnected (attempt {}), retrying in {}s: {}", attempt, wait, exc)
-                    await asyncio.sleep(wait)
+        # Spot listener intentionally removed — spot tracking is disabled.
 
         # ── Futures listener ───────────────────────────────────────────────────
         async def _futures_listener() -> None:
@@ -164,6 +125,8 @@ class BinanceExchange(ExchangeBase):
             assert self._client is not None, "AsyncClient not initialized"
 
             attempt = 0
+            connected = False
+            lost_emitted = False
             while self._running:
                 try:
                     # Get a fresh listenKey
@@ -183,6 +146,10 @@ class BinanceExchange(ExchangeBase):
                             if not got_first:
                                 attempt = 0
                                 got_first = True
+                                connected = True
+                                if lost_emitted:
+                                    lost_emitted = False
+                                    await queue.put(("CONNECTION", {"stream": "FUTURES", "status": "restored"}))
                             try:
                                 payload = json.loads(msg) if isinstance(msg, str) else msg
                             except Exception:
@@ -228,6 +195,11 @@ class BinanceExchange(ExchangeBase):
                 except asyncio.CancelledError:
                     return
                 except Exception as exc:
+                    # Notify once per outage, only when an established connection drops.
+                    if connected and not lost_emitted:
+                        lost_emitted = True
+                        await queue.put(("CONNECTION", {"stream": "FUTURES", "status": "lost", "error": str(exc)}))
+                    connected = False
                     attempt += 1
                     wait = min(2 ** attempt, 60)
                     logger.error(
@@ -239,19 +211,6 @@ class BinanceExchange(ExchangeBase):
         # ── listenKey keepalive ────────────────────────────────────────────────
         # python-binance does not expose the listenKey after socket creation, but
         # it provides dedicated keepalive endpoints we can call with a fresh fetch.
-        async def _spot_keepalive() -> None:
-
-            assert self._client is not None, "AsyncClient not initialized"
-
-            while self._running:
-                await asyncio.sleep(30 * 60)
-                try:
-                    # Correct method name on AsyncClient
-                    await self._client.stream_get_listen_key()
-                    logger.debug("Spot listenKey refreshed")
-                except Exception as exc:
-                    logger.error("Spot listenKey keepalive failed: {}", exc)
-
         async def _futures_keepalive() -> None:
 
             assert self._client is not None, "AsyncClient not initialized"
@@ -267,9 +226,7 @@ class BinanceExchange(ExchangeBase):
 
         # ── Run listeners + drain queue ────────────────────────────────────────
         tasks = [
-            asyncio.create_task(_spot_listener(),      name="binance-spot-listener"),
             asyncio.create_task(_futures_listener(),   name="binance-futures-listener"),
-            asyncio.create_task(_spot_keepalive(),     name="binance-spot-keepalive"),
             asyncio.create_task(_futures_keepalive(),  name="binance-futures-keepalive"),
         ]
         try:

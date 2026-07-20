@@ -5,7 +5,7 @@ import signal
 from loguru import logger
 
 from config import settings
-from src.formatter import order_message, position_message
+from src.formatter import connection_message, order_message, position_message
 from src.logger import setup_logger
 from src.exchange.binance import BinanceExchange
 from src.models import OrderStatus
@@ -64,8 +64,15 @@ async def main() -> None:
                 await pushover_notifier.notify_position_closed(position)
         return _cb
 
+    def make_connection_callback(telegram_bot: TelegramBot):
+        async def _cb(info):
+            # Health alert — bypass pause so outages are always surfaced.
+            await telegram_bot.broadcast_message(connection_message(info), bypass_pause=True)
+        return _cb
+
     monitor.on_order_event(make_order_callback(telegram))
     monitor.on_position_event(make_position_callback(telegram,pushover))
+    monitor.on_connection_event(make_connection_callback(telegram))
 
     async def _dashboard_refresh_loop() -> None:
         while True:

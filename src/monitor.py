@@ -13,8 +13,9 @@ from .models import Order, OrderStatus, Position, StateSnapshot
 def _pos_key(p: Position) -> str:
     return f"{p.symbol}_{p.position_side.value}"
 
-OrderCallback    = Callable[[Order,    str], Awaitable[None]]
-PositionCallback = Callable[[Position, str], Awaitable[None]]
+OrderCallback      = Callable[[Order,    str], Awaitable[None]]
+PositionCallback   = Callable[[Position, str], Awaitable[None]]
+ConnectionCallback = Callable[[dict], Awaitable[None]]
 
 
 class ChangeMonitor:
@@ -23,8 +24,9 @@ class ChangeMonitor:
         self._reconcile_interval = reconcile_interval
         self._state = StateSnapshot()
         self._running = False
-        self._order_cbs:    list[OrderCallback]    = []
-        self._position_cbs: list[PositionCallback] = []
+        self._order_cbs:      list[OrderCallback]      = []
+        self._position_cbs:   list[PositionCallback]   = []
+        self._connection_cbs: list[ConnectionCallback] = []
         # Task handles — set in start(), used in stop()
         self._stream_task:  asyncio.Task | None = None
         self._recon_task:   asyncio.Task | None = None
@@ -36,6 +38,9 @@ class ChangeMonitor:
 
     def on_position_event(self, cb: PositionCallback) -> None:
         self._position_cbs.append(cb)
+
+    def on_connection_event(self, cb: ConnectionCallback) -> None:
+        self._connection_cbs.append(cb)
 
     def current_state(self) -> StateSnapshot:
         """Return a deep copy so callers cannot accidentally mutate live state."""
@@ -94,6 +99,8 @@ class ChangeMonitor:
                     await self._handle_order_event(payload)
                 elif event_type == "POSITION_UPDATE":
                     await self._handle_position_event(payload)
+                elif event_type == "CONNECTION" and isinstance(payload, dict):
+                    await self._handle_connection_event(payload)
         except asyncio.CancelledError:
             return
         except Exception as exc:
@@ -124,82 +131,81 @@ class ChangeMonitor:
 
     async def _diff_orders(self, rest_orders: list[Order]) -> None:
         """
-        Compare REST snapshot against local state and fire events for gaps.
+        Reconcile the REST open-orders snapshot into local state **silently**.
 
-        Three cases:
-          A) Order in REST but not in local state → truly new, fire OPENED.
-          B) Order in both but status changed → delegate to _handle_order_event.
-          C) Order in local state but absent from REST while still open locally
-             → it closed between WebSocket events; infer the final status and fire.
+        Reconciliation never notifies — its only job is to keep the in-memory
+        state (and therefore the pinned dashboard) consistent with reality,
+        catching anything the WebSocket stream missed. Notifications come solely
+        from live WebSocket events, which carry the true order status.
+
+        This matters because `fetch_open_orders` returns only *open* orders: when
+        an order vanishes from it we know it closed but not *how* (filled vs.
+        canceled vs. expired). Guessing here previously produced false "FILLED"
+        messages, so we no longer emit anything from reconciliation at all.
+
+        Cases:
+          A) In REST, not in local state  → add.
+          B) In both, status changed      → update.
+          C) Open locally, gone from REST → closed; drop from state.
         """
         rest_map = {o.order_id: o for o in rest_orders}
 
-        # Cases A and B
+        # Cases A and B — add new / update changed, state only
         for oid, order in rest_map.items():
-            if oid not in self._state.orders:
-                # Genuinely new — fire OPENED
-                await self._handle_order_event(order)
-            else:
-                existing = self._state.orders[oid]
-                if order.status != existing.status:
-                    await self._handle_order_event(order)
+            existing = self._state.orders.get(oid)
+            if existing is None or order.status != existing.status:
+                self._state.orders[oid] = order
 
         # Case C — order was open locally but has vanished from REST
         for oid, existing in list(self._state.orders.items()):
             if oid not in rest_map and existing.is_open:
-                # Build a synthetic closed order with the most likely terminal status
-                inferred_status = OrderStatus.FILLED
-                closed = dc_replace(existing, status=inferred_status)
                 logger.debug(
-                    "Order {} absent from REST while open locally — inferring {}",
-                    oid, inferred_status.value,
+                    "Order {} vanished from REST during reconciliation — "
+                    "removing from state (no notification)", oid,
                 )
-                await self._handle_order_event(closed)
+                del self._state.orders[oid]
 
     async def _diff_positions(self, rest_positions: list[Position]) -> None:
         """
-        Compare REST positions against local state.
+        Reconcile REST positions into local state **silently** (see _diff_orders).
 
         Cases:
-          A) Symbol in REST but not local, and open   → OPENED
-          B) Symbol in local but not REST, and open   → CLOSED (missed WebSocket event)
-          C) Symbol in both but side flipped          → CLOSED old, OPENED new
+          A) In REST, not in local state  → add.
+          B) Open locally, gone from REST → closed; drop from state.
+          C) In both but side flipped     → replace with the new side.
+          D) In both, same side           → refresh REST-only fields.
         """
         rest_map = {_pos_key(p): p for p in rest_positions}
 
-        # Case A and C
+        # Cases A, C and D
         for sym, pos in rest_map.items():
-            if sym not in self._state.positions:
+            existing = self._state.positions.get(sym)
+            if existing is None:
                 # New position
-                await self._handle_position_event(pos)
+                self._state.positions[sym] = pos
+            elif (
+                existing.position_amt != pos.position_amt
+                and existing.direction != pos.direction
+            ):
+                # Side flip (e.g. LONG → SHORT): replace with the current side.
+                self._state.positions[sym] = pos
             else:
-                existing = self._state.positions[sym]
-                # Detect side flip: e.g. LONG → SHORT
-                if (
-                    existing.position_amt != pos.position_amt
-                    and existing.direction != pos.direction
-                ):
-                    # Close the old side first, then open the new one
-                    closed = dc_replace(existing, position_amt=0.0)
-                    await self._handle_position_event(closed)
-                    await self._handle_position_event(pos)
-                else:
-                    # Silently refresh REST-only fields not available in WS events.
-                    self._state.positions[sym] = dc_replace(
-                        existing,
-                        leverage=pos.leverage,
-                        liquidation_price=pos.liquidation_price,
-                        mark_price=pos.mark_price,
-                    )
+                # Refresh REST-only fields not available in WS events.
+                self._state.positions[sym] = dc_replace(
+                    existing,
+                    leverage=pos.leverage,
+                    liquidation_price=pos.liquidation_price,
+                    mark_price=pos.mark_price,
+                )
 
         # Case B — position was open locally but absent from REST
         for sym, existing in list(self._state.positions.items()):
             if sym not in rest_map and existing.is_open:
-                closed = dc_replace(existing, position_amt=0.0)
                 logger.debug(
-                    "Position {} absent from REST while open locally — inferring CLOSED", sym
+                    "Position {} vanished from REST during reconciliation — "
+                    "removing from state (no notification)", sym,
                 )
-                await self._handle_position_event(closed)
+                del self._state.positions[sym]
 
     # ── Event handlers (used by both WebSocket and reconciliation) ────────────
 
@@ -262,6 +268,14 @@ class ChangeMonitor:
         if event != "UPDATED":
             await self._fire_position(position, event)
 
+    async def _handle_connection_event(self, info: dict) -> None:
+        """Forward WebSocket connectivity changes (lost/restored) to callbacks."""
+        logger.warning(
+            "WebSocket connection {}: stream={} {}",
+            info.get("status"), info.get("stream"), info.get("error") or "",
+        )
+        await self._fire_connection(info)
+
     # ── Callback dispatch ─────────────────────────────────────────────────────
 
     async def _fire_order(self, order: Order, event: str) -> None:
@@ -277,3 +291,10 @@ class ChangeMonitor:
                 await cb(position, event)
             except Exception as exc:
                 logger.error("Position callback raised: {}", exc)
+
+    async def _fire_connection(self, info: dict) -> None:
+        for cb in self._connection_cbs:
+            try:
+                await cb(info)
+            except Exception as exc:
+                logger.error("Connection callback raised: {}", exc)

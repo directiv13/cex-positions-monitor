@@ -239,9 +239,13 @@ class TelegramBot:
         except asyncio.CancelledError:
             return
         
-    async def broadcast_message(self, text: str) -> None:
-        """Send a plain text message to the channel."""
-        if self._paused:
+    async def broadcast_message(self, text: str, bypass_pause: bool = False) -> None:
+        """Send a plain text message to the channel.
+
+        `bypass_pause` lets health alerts (e.g. WebSocket connectivity) through
+        even while event notifications are paused.
+        """
+        if self._paused and not bypass_pause:
             logger.debug("Bot is paused; skipping broadcast message")
             return
         
