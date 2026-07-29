@@ -10,6 +10,16 @@ def _utcnow_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
+def _fmt_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    minutes, secs = divmod(int(seconds), 60)
+    if minutes < 60:
+        return f"{minutes}m {secs}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes}m"
+
+
 def _fmt_price(p: float) -> str:
     if p == 0:
         return "MARKET"
@@ -25,8 +35,7 @@ def dashboard_message(orders: List[Order], positions: List[Position]) -> str:
     if positions:
         parts.append("<b>📈 Open Positions</b>")
         for p in positions:
-            lev_str = f"{p.leverage}x" if p.leverage is not None else "?x"
-            parts.append(f"• [{p.exchange}] {p.direction} <code>{p.position_amt}</code> <code>{p.symbol}</code> entry={_fmt_price(p.entry_price)}  PnL={p.unrealised_pnl:+.2f} USDT  {lev_str} {p.margin_type.upper()}")
+            parts.append(f"• [{p.exchange}] {p.direction} <code>{p.position_amt}</code> <code>{p.symbol}</code> entry={_fmt_price(p.entry_price)}  PnL={p.unrealised_pnl:+.2f} USDT  {p.margin_type.upper()}")
         parts.append("")
 
     if orders:
@@ -69,6 +78,9 @@ def connection_message(info: dict) -> str:
     elif status == "restored":
         header = f"✅ <b>{stream} WebSocket reconnected</b>"
         detail = "Live updates resumed."
+        downtime = info.get("downtime")
+        if isinstance(downtime, (int, float)) and downtime > 0:
+            detail += f" Down for {_fmt_duration(float(downtime))}."
     else:
         header = f"ℹ️ <b>{stream} WebSocket: {status or 'unknown'}</b>"
         detail = ""

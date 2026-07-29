@@ -191,11 +191,14 @@ class ChangeMonitor:
                 self._state.positions[sym] = pos
             else:
                 # Refresh REST-only fields not available in WS events.
+                # unrealised_pnl included: ACCOUNT_UPDATE zeroes it, so without
+                # this the dashboard would show +0.00 PnL from the first WS
+                # position event onwards.
                 self._state.positions[sym] = dc_replace(
                     existing,
-                    leverage=pos.leverage,
                     liquidation_price=pos.liquidation_price,
                     mark_price=pos.mark_price,
+                    unrealised_pnl=pos.unrealised_pnl,
                 )
 
         # Case B — position was open locally but absent from REST
@@ -241,14 +244,13 @@ class ChangeMonitor:
     async def _handle_position_event(self, position: Position) -> None:
         key = _pos_key(position)
 
-        # Merge REST-only fields (leverage, liquidation_price) from existing state
-        # when the incoming position came from a WebSocket event that lacks them.
+        # Carry over liquidation_price from existing state when the incoming
+        # position came from a WebSocket event, which does not carry it.
         existing = self._state.positions.get(key)
-        if existing and position.leverage is None:
+        if existing and not position.liquidation_price:
             position = dc_replace(
                 position,
-                leverage=existing.leverage,
-                liquidation_price=existing.liquidation_price or position.liquidation_price,
+                liquidation_price=existing.liquidation_price,
             )
 
         if key not in self._state.positions:

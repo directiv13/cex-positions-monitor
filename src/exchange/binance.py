@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import websockets
 import json
+import time
 from dataclasses import replace as dc_replace
 
 from collections.abc import AsyncIterator
@@ -13,6 +14,33 @@ from loguru import logger
 
 from ..models import Order, OrderStatus, Position, PositionSide
 from .base import ExchangeBase
+
+
+# ── Futures user-data socket tuning ───────────────────────────────────────────
+# The client sends a ping every PING_INTERVAL and drops the connection if no
+# pong arrives within PING_TIMEOUT. The library default (20/20) is aggressive
+# for a link that occasionally stalls; 20/60 keeps dead-connection detection
+# without killing healthy-but-slow ones.
+WS_PING_INTERVAL = 20
+WS_PING_TIMEOUT = 60
+WS_OPEN_TIMEOUT = 10
+WS_CLOSE_TIMEOUT = 5
+# Frames buffered before websockets pauses reading from the transport. While
+# paused, *no* frames are read — including pongs — which self-inflicts a
+# "keepalive ping timeout". The read loop below does no I/O, so this headroom
+# only ever matters during a burst.
+WS_MAX_QUEUE = 256
+WS_MAX_BACKOFF = 60
+# How long a session must hold before it counts as healthy. Below this the
+# connection is flapping: the backoff keeps escalating and no "restored" alert
+# is sent, so an unstable link produces one ⚠️ instead of a ⚠️/✅ every few
+# seconds.
+WS_STABLE_SESSION_SECONDS = 30
+# Futures listenKeys expire 60 minutes after creation; refresh at half that.
+LISTEN_KEY_REFRESH_SECONDS = 30 * 60
+# Hard ceiling on every REST call. Without it aiohttp allows 5 minutes, long
+# enough for a single hung request to stall the reconnect loop.
+REST_TIMEOUT_SECONDS = 10
 
 
 class BinanceExchange(ExchangeBase):
@@ -26,11 +54,15 @@ class BinanceExchange(ExchangeBase):
         self._running = False
         # Single stop-event owned here; stream_events watches it.
         self._stop_event: asyncio.Event = asyncio.Event()
+        # Current futures listenKey, published by the listener for the keepalive
+        # task; None whenever no socket is established.
+        self._futures_listen_key: str | None = None
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
     async def start(self) -> None:
         try:
+            from aiohttp import ClientTimeout
             from binance import AsyncClient
         except ImportError:
             logger.error(
@@ -40,7 +72,10 @@ class BinanceExchange(ExchangeBase):
             return
 
         self._client = await AsyncClient.create(
-            self._api_key, self._api_secret, testnet=self._testnet
+            self._api_key,
+            self._api_secret,
+            testnet=self._testnet,
+            session_params={"timeout": ClientTimeout(total=REST_TIMEOUT_SECONDS)},
         )
         self._running = True
         self._stop_event.clear()
@@ -98,11 +133,20 @@ class BinanceExchange(ExchangeBase):
         cleanly when stop() is called.
 
         Reconnection uses exponential backoff: wait = min(2^attempt, 60) seconds.
-        The backoff counter resets only after the first successful message.
+        The counter resets after any session that stayed up for
+        WS_STABLE_SESSION_SECONDS, so a normal drop retries in 2s while genuine
+        flapping backs off.
 
-        listenKey keepalive is done correctly by passing the key that the socket
-        context manager exposes, rather than calling the no-arg variant that raises
-        TypeError.
+        CONNECTION events track the *socket*, not the message flow. A futures
+        user-data stream is silent while the account is idle, so gating them on
+        an incoming payload would report outages that lasted seconds as if they
+        had lasted until the next trade. "restored" is therefore tied to the
+        handshake — held back only long enough to confirm the session holds, and
+        reporting the downtime measured to the moment the socket came back.
+
+        The read loop performs no I/O. Any await in here stalls frame processing,
+        which fills the receive buffer, pauses the transport and makes websockets
+        kill the connection with a "keepalive ping timeout".
         """
         if self._client is None:
             logger.error(
@@ -125,34 +169,55 @@ class BinanceExchange(ExchangeBase):
             assert self._client is not None, "AsyncClient not initialized"
 
             attempt = 0
-            connected = False
             lost_emitted = False
+            lost_at = 0.0
+            restore_task: asyncio.Task | None = None
+
+            async def _announce_restore(reconnected_at: float) -> None:
+                """Report the reconnect only once the socket has proven it holds."""
+                nonlocal lost_emitted
+                await asyncio.sleep(WS_STABLE_SESSION_SECONDS)
+                lost_emitted = False
+                await queue.put((
+                    "CONNECTION",
+                    {
+                        "stream": "FUTURES",
+                        "status": "restored",
+                        "downtime": reconnected_at - lost_at,
+                    },
+                ))
+
             while self._running:
+                connected_at = 0.0
                 try:
                     # Get a fresh listenKey
                     listen_key = await self._client.futures_stream_get_listen_key()
+                    self._futures_listen_key = listen_key
                     url = f"wss://fstream.binance.com/private/ws/{listen_key}"
                     logger.info("Futures WS connecting to: {}", url)
 
-                    async with websockets.connect(url) as socket:
-                        got_first = False
-                        while self._running:
+                    async with websockets.connect(
+                        url,
+                        ping_interval=WS_PING_INTERVAL,
+                        ping_timeout=WS_PING_TIMEOUT,
+                        open_timeout=WS_OPEN_TIMEOUT,
+                        close_timeout=WS_CLOSE_TIMEOUT,
+                        max_queue=WS_MAX_QUEUE,
+                    ) as socket:
+                        connected_at = time.monotonic()
+                        logger.info("Futures WS connected")
+                        if lost_emitted and restore_task is None:
+                            restore_task = asyncio.create_task(
+                                _announce_restore(connected_at),
+                                name="binance-futures-restore-announce",
+                            )
+
+                        async for msg in socket:
                             try:
-                                msg = await asyncio.wait_for(socket.recv(), timeout=30.0)
-                            except asyncio.TimeoutError:
-                                # Send a ping to keep the connection alive
-                                await socket.ping()
-                                continue
-                            if not got_first:
-                                attempt = 0
-                                got_first = True
-                                connected = True
-                                if lost_emitted:
-                                    lost_emitted = False
-                                    await queue.put(("CONNECTION", {"stream": "FUTURES", "status": "restored"}))
-                            try:
-                                payload = json.loads(msg) if isinstance(msg, str) else msg
+                                payload = json.loads(msg) if isinstance(msg, (str, bytes)) else msg
                             except Exception:
+                                continue
+                            if not isinstance(payload, dict):
                                 continue
                             et = payload.get("e")
                             if et == "ORDER_TRADE_UPDATE":
@@ -176,13 +241,10 @@ class BinanceExchange(ExchangeBase):
                                 acc = payload.get("a") or {}
                                 for p in acc.get("P") or []:
                                     try:
-                                        amt = float(p.get("pa") or 0)
+                                        float(p.get("pa") or 0)
                                     except (TypeError, ValueError):
                                         continue
                                     pos = self._parse_position_from_ws(p)
-                                    lev = await self._fetch_leverage(pos.symbol, pos.position_side.value)
-                                    if lev is not None:
-                                        pos = dc_replace(pos, leverage=lev)
                                     if not pos.is_open:
                                         rp_key = f"{pos.symbol}_{pos.position_side.value}"
                                         if rp_key in _last_rp:
@@ -193,33 +255,49 @@ class BinanceExchange(ExchangeBase):
                                 break
 
                 except asyncio.CancelledError:
+                    if restore_task is not None:
+                        restore_task.cancel()
                     return
                 except Exception as exc:
-                    # Notify once per outage, only when an established connection drops.
-                    if connected and not lost_emitted:
+                    # One alert per outage; cleared once a reconnect is confirmed.
+                    if not lost_emitted:
                         lost_emitted = True
+                        lost_at = time.monotonic()
                         await queue.put(("CONNECTION", {"stream": "FUTURES", "status": "lost", "error": str(exc)}))
-                    connected = False
-                    attempt += 1
-                    wait = min(2 ** attempt, 60)
-                    logger.error(
-                        "Futures WS error (attempt {}), retrying in {}s: {}",
-                        attempt, wait, exc,
-                    )
-                    await asyncio.sleep(wait)
+                    logger.error("Futures WS error: {}", exc)
+                finally:
+                    self._futures_listen_key = None
+                    # Died before the reconnect was confirmed — stay in the
+                    # "lost" state rather than announcing a recovery.
+                    if restore_task is not None:
+                        if not restore_task.done():
+                            restore_task.cancel()
+                        restore_task = None
+
+                if not self._running:
+                    break
+
+                if connected_at and time.monotonic() - connected_at >= WS_STABLE_SESSION_SECONDS:
+                    attempt = 0
+                attempt += 1
+                wait = min(2 ** attempt, WS_MAX_BACKOFF)
+                logger.info("Futures WS reconnecting in {}s (attempt {})", wait, attempt)
+                await asyncio.sleep(wait)
 
         # ── listenKey keepalive ────────────────────────────────────────────────
-        # python-binance does not expose the listenKey after socket creation, but
-        # it provides dedicated keepalive endpoints we can call with a fresh fetch.
+        # Extends the key the listener is currently using. Skipped while no
+        # socket is up — the listener fetches a fresh key on every reconnect.
         async def _futures_keepalive() -> None:
 
             assert self._client is not None, "AsyncClient not initialized"
 
             while self._running:
-                await asyncio.sleep(30 * 60)
+                await asyncio.sleep(LISTEN_KEY_REFRESH_SECONDS)
+                listen_key = self._futures_listen_key
+                if listen_key is None:
+                    continue
                 try:
-                    # Correct method name on AsyncClient
-                    await self._client.futures_stream_get_listen_key()
+                    await self._client.futures_stream_keepalive(listen_key)
                     logger.debug("Futures listenKey refreshed")
                 except Exception as exc:
                     logger.error("Futures listenKey keepalive failed: {}", exc)
@@ -242,23 +320,6 @@ class BinanceExchange(ExchangeBase):
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-
-    # ── REST helpers ──────────────────────────────────────────────────────────
-
-    async def _fetch_leverage(self, symbol: str, position_side: str) -> int | None:
-        """Return the current leverage for symbol/side from REST, or None on failure."""
-
-        assert self._client is not None, "AsyncClient not initialized"
-
-        try:
-            risk_list = await self._client.futures_position_information(symbol=symbol)
-            for risk in risk_list:
-                if risk.get("positionSide") == position_side:
-                    lev = int(float(risk.get("leverage") or 0))
-                    return lev if lev > 0 else None
-        except Exception as exc:
-            logger.debug("Could not fetch leverage for {}/{}: {}", symbol, position_side, exc)
-        return None
 
     # ── Parsing helpers ────────────────────────────────────────────────────────
 
@@ -337,9 +398,8 @@ class BinanceExchange(ExchangeBase):
           s=symbol, pa=positionAmt, ep=entryPrice, up=unrealizedPnL,
           mt=marginType, iw=isolatedWallet, ps=positionSide
 
-        NOTE: leverage and liquidationPrice are NOT present in ACCOUNT_UPDATE.
-        They default to 1 and 0 respectively; callers should treat them as
-        unavailable rather than meaningful values.
+        NOTE: liquidationPrice is NOT present in ACCOUNT_UPDATE; it defaults to
+        0 and callers should treat that as unavailable rather than meaningful.
         """
         try:
             amt = float(raw.get("pa") or 0)
@@ -370,7 +430,6 @@ class BinanceExchange(ExchangeBase):
             position_amt=amt,
             realised_pnl=pnl,
             unrealised_pnl=0.0,      # not available in ACCOUNT_UPDATE
-            leverage=None,            # not available in ACCOUNT_UPDATE
             margin_type=str(raw.get("mt") or "cross"),
             liquidation_price=0.0,    # not available in ACCOUNT_UPDATE
             exchange=self.name,
@@ -442,11 +501,6 @@ class BinanceExchange(ExchangeBase):
             pnl = 0.0
 
         try:
-            lev = int(float(raw.get("leverage") or 1))
-        except (TypeError, ValueError):
-            lev = 1
-
-        try:
             liq = float(raw.get("liquidationPrice") or 0)
         except (TypeError, ValueError):
             liq = 0.0
@@ -465,7 +519,6 @@ class BinanceExchange(ExchangeBase):
             position_amt=amt,
             realised_pnl=0.0,  # not available in REST endpoint, only ACCOUNT_UPDATE WS events
             unrealised_pnl=pnl,
-            leverage=lev,
             margin_type=str(raw.get("marginType") or "cross"),
             liquidation_price=liq,
             exchange=self.name,

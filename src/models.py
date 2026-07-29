@@ -76,7 +76,6 @@ class Position:
     position_amt: float     # positive = LONG, negative = SHORT
     realised_pnl: float
     unrealised_pnl: float
-    leverage: int | None
     margin_type: str        # isolated / cross
     liquidation_price: float
     exchange: str = "UNKNOWN"
@@ -97,7 +96,7 @@ class Position:
             emodji = "🟢" if self.position_amt > 0 else "🔴"
             msg += (f"\n<b>{emodji} OPEN {self.direction} POSITION</b>\n"
                     f"\n<code>{self.symbol}</code>\n"
-                    f"\n{self.margin_type.upper()} | {f'{self.leverage}x' if self.leverage is not None else '?x'}\n"
+                    f"\n{self.margin_type.upper()}\n"
                     f"\n🤑 <b>Amount:</b> {abs(self.position_amt)}"
                     f"\n💲 <b>Entry Price:</b> {self.entry_price}")
         else:
